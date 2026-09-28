@@ -36,10 +36,12 @@ pub mod wallet;
 pub mod wire;
 
 pub use address::WasmTariAddress;
-pub use burn::{WasmBurnBuilder, WasmSignedBurn};
 pub use amount::{amount_to_currency_string, calculate_fee, parse_amount_string};
+pub use burn::{WasmBurnBuilder, WasmSignedBurn};
 pub use commitment::{commitment_commit_value, commitment_open_value};
 pub use hashing::{blake2b_256_hex, blake2b_512_hex};
 pub use keys::WasmKeyPair;
 pub use schnorr::WasmSchnorrSignature;
-pub use wallet::{WasmSignedTransaction, WasmTxBuilder, WasmWallet, WasmWalletOutput};
+pub use wallet::{
+    WasmSignedTransaction, WasmTxBuilder, WasmViewedOutput, WasmWallet, WasmWalletOutput,
+};

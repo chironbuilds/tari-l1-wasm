@@ -46,8 +46,62 @@ const restored = WasmWallet.fromBackupHex(backup, "esmeralda");
 check("backup restore produces same address", restored.getAddress().toBase58() === alice.getAddress().toBase58());
 const aliceAddr = alice.getAddress();
 check("alice address is dual one-sided", !aliceAddr.isSingle && aliceAddr.network === "esmeralda");
+const watch = WasmWallet.fromViewKeyAndAddress(alice.exportPrivateViewKeyHex(), aliceAddr.toBase58());
+check("watch-only address matches", watch.getAddress().toBase58() === aliceAddr.toBase58());
+check("watch-only cannot spend", watch.isViewOnly && !watch.canSpend);
+for (const [name, privateViewKey, publicViewKey, publicSpendKey] of [
+  ["zero view key", "00".repeat(32), "00".repeat(32), alice.publicSpendKeyHex],
+  ["identity spend key", alice.exportPrivateViewKeyHex(), alice.publicViewKeyHex, "00".repeat(32)],
+  ["invalid spend point", alice.exportPrivateViewKeyHex(), alice.publicViewKeyHex, "ff".repeat(32)],
+]) {
+  const address = WasmTariAddress.newDual(publicViewKey, publicSpendKey, "esmeralda", 1);
+  for (const [constructor, create] of [
+    ["fromViewKeyHex", () => WasmWallet.fromViewKeyHex(privateViewKey, publicSpendKey, "esmeralda")],
+    ["fromViewKeyAndAddress", () => WasmWallet.fromViewKeyAndAddress(privateViewKey, address.toBase58())],
+  ]) {
+    try {
+      create().free();
+      check(`${constructor} rejects ${name}`, false);
+    } catch {
+      check(`${constructor} rejects ${name}`, true);
+    }
+  }
+  address.free();
+}
+try {
+  watch.createSelfUtxo(1n);
+  check("watch-only output creation rejects", false);
+} catch {
+  check("watch-only output creation rejects", true);
+}
 
 // --- Recipient ---
+const recoveryFixture = JSON.parse(readFileSync(new URL("./tests/fixtures/output_recovery.json", import.meta.url), "utf8"));
+const recoveryWallet = WasmWallet.fromBackupHex(recoveryFixture.backupHex, "esmeralda");
+const [scriptHex, metadataSignatureHex, minimumValuePromise, maturity, outputType, rangeProofType,
+  coinbaseExtraHex, covenantHex, rangeProofHex, outputHashHex] = recoveryFixture.importArgs;
+const importArgs = [
+  scriptHex, metadataSignatureHex, BigInt(minimumValuePromise), BigInt(maturity),
+  Number(outputType), Number(rangeProofType), coinbaseExtraHex, covenantHex, rangeProofHex, outputHashHex,
+];
+for (const fixture of recoveryFixture.cases) {
+  const args = [recoveryFixture.commitmentHex, fixture.encryptedDataHex, recoveryFixture.senderOffsetPublicKeyHex];
+  check(`detect ${fixture.name}`, recoveryWallet.isOutputMine(...args) === fixture.valid);
+  if (fixture.valid) {
+    const output = recoveryWallet.importScannedOutput(...args, ...importArgs);
+    check(`import ${fixture.name}`, output.valueMicro === 123n && output.commitmentHex === recoveryFixture.commitmentHex);
+    output.free();
+  } else {
+    try {
+      recoveryWallet.importScannedOutput(...args, ...importArgs).free();
+      check(`reject import ${fixture.name}`, false);
+    } catch (error) {
+      check(`reject import ${fixture.name}`, String(error).includes("output does not belong to this wallet"));
+    }
+  }
+}
+recoveryWallet.free();
+
 const bob = new WasmWallet("esmeralda");
 const bobAddress = bob.getAddress().toBase58();
 
@@ -74,7 +128,7 @@ check("submit request payload > 1KB (range proofs included)", submitBytes.length
 console.log(`  submit payload size: ${submitBytes.length} bytes`);
 
 // Multi-recipient build
-const carol = new WasmWallet("mainnet");
+const carol = new WasmWallet("esmeralda");
 const utxo2 = alice.createSelfUtxo(3_000_000n);
 const b2 = new WasmTxBuilder(alice);
 b2.addInput(utxo2);

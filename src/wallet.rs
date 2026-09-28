@@ -27,21 +27,25 @@ use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::cipher_seed::CipherSeed,
     tari_address::{TariAddress, TariAddressFeatures},
-    types::{ComAndPubSignature, CompressedCommitment, CompressedPublicKey, FixedHash, RangeProof},
+    types::{
+        ComAndPubSignature, CompressedCommitment, CompressedPublicKey, FixedHash, PrivateKey,
+        RangeProof,
+    },
 };
-use tari_script::{TariScript, script};
+use tari_script::{script, TariScript};
 use tari_transaction_components::{
-    MicroMinotari, TransactionBuilder,
     consensus::{ConsensusConstants, NetworkConsensus},
     key_manager::{
+        wallet_types::{SeedWordsWallet, ViewWallet, WalletType},
         KeyManager, SerializedKeyString, TariKeyId, TransactionKeyManagerInterface,
-        wallet_types::{SeedWordsWallet, WalletType},
     },
     transaction_components::TransactionError,
     transaction_components::{
-        CoinBaseExtra, EncryptedData, MemoField, OutputFeatures, OutputFeaturesVersion, OutputType, RangeProofType,
-        TransactionOutput, TransactionOutputVersion, WalletOutput, covenants::Covenant,
+        covenants::Covenant, CoinBaseExtra, EncryptedData, MemoField, OutputFeatures,
+        OutputFeaturesVersion, OutputType, RangeProofType, TransactionOutput,
+        TransactionOutputVersion, WalletOutput,
     },
+    MicroMinotari, TransactionBuilder,
 };
 use tari_utilities::hex::Hex;
 use tari_utilities::ByteArray;
@@ -52,8 +56,12 @@ fn js_err<E: std::fmt::Display>(context: &str, err: E) -> JsValue {
 }
 
 fn parse_network(network: &str) -> Result<Network, JsValue> {
-    let network = Network::from_str(network)
-        .map_err(|e| js_err("invalid network (mainnet|stagenet|nextnet|localnet|igor|esmeralda)", e))?;
+    let network = Network::from_str(network).map_err(|e| {
+        js_err(
+            "invalid network (mainnet|stagenet|nextnet|localnet|igor|esmeralda)",
+            e,
+        )
+    })?;
     set_current_network(network)?;
     Ok(network)
 }
@@ -85,7 +93,11 @@ pub(crate) fn set_current_network(network: Network) -> Result<(), JsValue> {
 pub fn constants_for_height(network: Network, tip_height: u64) -> ConsensusConstants {
     let all = NetworkConsensus::from(network).create_consensus_constants();
     // Constants epochs are ordered by `effective_from_height`; pick the newest applicable one.
-    match all.iter().rev().find(|c| c.effective_from_height() <= tip_height) {
+    match all
+        .iter()
+        .rev()
+        .find(|c| c.effective_from_height() <= tip_height)
+    {
         Some(c) => c.clone(),
         None => NetworkConsensus::from(network)
             .create_consensus_constants()
@@ -107,11 +119,139 @@ pub struct WasmWallet {
     cipher_seed: Option<CipherSeed>,
 }
 
+/// A verified output value and memo, without spending authority. Free the handle after use.
+#[wasm_bindgen]
+pub struct WasmViewedOutput {
+    commitment_hex: String,
+    value: MicroMinotari,
+    memo: MemoField,
+}
+
+#[wasm_bindgen]
+impl WasmViewedOutput {
+    /// Commitment encoded as lowercase hex.
+    #[wasm_bindgen(getter, js_name = commitmentHex)]
+    pub fn commitment_hex(&self) -> String {
+        self.commitment_hex.clone()
+    }
+
+    /// Recovered value in microMinotari, verified against the commitment.
+    #[wasm_bindgen(getter, js_name = valueMicro)]
+    pub fn value_micro(&self) -> u64 {
+        self.value.as_u64()
+    }
+
+    /// Raw payment ID bytes from the memo.
+    #[wasm_bindgen(getter, js_name = paymentId)]
+    pub fn payment_id(&self) -> Vec<u8> {
+        self.memo.get_payment_id()
+    }
+
+    /// Payment ID as UTF-8 text, or undefined if decoding fails.
+    #[wasm_bindgen(getter, js_name = paymentIdText)]
+    pub fn payment_id_text(&self) -> Option<String> {
+        String::from_utf8(self.memo.get_payment_id()).ok()
+    }
+
+    /// Sender-reported fee in microMinotari, when present in the memo.
+    #[wasm_bindgen(getter, js_name = senderFeeMicro)]
+    pub fn sender_fee_micro(&self) -> Option<u64> {
+        self.memo.get_fee().map(|fee| fee.as_u64())
+    }
+
+    /// Transaction type label reported by the memo.
+    #[wasm_bindgen(getter, js_name = txType)]
+    pub fn tx_type(&self) -> String {
+        self.memo.get_type().to_string()
+    }
+
+    /// Complete serialized memo, including its type and payment ID.
+    #[wasm_bindgen(getter, js_name = memoBytes)]
+    pub fn memo_bytes(&self) -> Vec<u8> {
+        self.memo.to_bytes()
+    }
+}
+
 impl WasmWallet {
     /// Builds a wallet around an existing key manager. Native-only: the wasm bindings always come
     /// in through a seed, but a test needs to drive the same wallet from both sides of a payment.
     pub fn from_key_manager_for_test(key_manager: KeyManager, network: Network) -> Self {
-        WasmWallet { key_manager, network, cipher_seed: None }
+        WasmWallet {
+            key_manager,
+            network,
+            cipher_seed: None,
+        }
+    }
+
+    fn from_view_parts(
+        private_view_key: PrivateKey,
+        public_spend_key: CompressedPublicKey,
+        network: Network,
+    ) -> Result<Self, JsValue> {
+        if private_view_key == PrivateKey::default() {
+            return Err(JsValue::from_str("private view key must not be zero"));
+        }
+        public_spend_key
+            .to_public_key()
+            .map_err(|e| js_err("invalid public spend key", e))?;
+        if public_spend_key == CompressedPublicKey::default() {
+            return Err(JsValue::from_str(
+                "public spend key must not be the identity",
+            ));
+        }
+        let wallet = ViewWallet::new(public_spend_key, private_view_key, None);
+        let key_manager = KeyManager::new(WalletType::ViewWallet(wallet))
+            .map_err(|e| js_err("failed to create view wallet", e))?;
+        Ok(Self {
+            key_manager,
+            network,
+            cipher_seed: None,
+        })
+    }
+
+    fn recover_output_data(
+        &self,
+        commitment_hex: &str,
+        encrypted_data_hex: &str,
+        sender_offset_pub_hex: &str,
+    ) -> Result<Option<(CompressedCommitment, MicroMinotari, MemoField)>, JsValue> {
+        let commitment = CompressedCommitment::from_hex(commitment_hex)
+            .map_err(|e| js_err("invalid commitment", e))?;
+        let encrypted_bytes = Vec::<u8>::from_hex(encrypted_data_hex)
+            .map_err(|e| js_err("invalid encrypted data", e))?;
+        let encrypted_data = EncryptedData::from_bytes(&encrypted_bytes)
+            .map_err(|e| js_err("invalid encrypted data", e))?;
+        let sender_offset_pub = CompressedPublicKey::from_hex(sender_offset_pub_hex)
+            .map_err(|e| js_err("invalid sender offset public key", e))?;
+        let Some((_, value, memo)) =
+            self.recover_output_keys(&commitment, &encrypted_data, &sender_offset_pub)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((commitment, value, memo)))
+    }
+
+    fn recover_output_keys(
+        &self,
+        commitment: &CompressedCommitment,
+        encrypted_data: &EncryptedData,
+        sender_offset_pub: &CompressedPublicKey,
+    ) -> Result<Option<(TariKeyId, MicroMinotari, MemoField)>, JsValue> {
+        let recovered = self
+            .key_manager
+            .try_output_key_recovery(commitment, encrypted_data, sender_offset_pub)
+            .map_err(|e| js_err("recovery failed", e))?;
+        let Some((key_id, value, memo)) = recovered else {
+            return Ok(None);
+        };
+        if !self
+            .key_manager
+            .verify_mask(commitment, &key_id, value.as_u64())
+            .map_err(|e| js_err("mask verification failed", e))?
+        {
+            return Ok(None);
+        }
+        Ok(Some((key_id, value, memo)))
     }
 }
 
@@ -121,8 +261,8 @@ impl WasmWallet {
     pub fn new(network: &str) -> Result<WasmWallet, JsValue> {
         let network = parse_network(network)?;
         let cipher_seed = CipherSeed::random();
-        let seed_wallet =
-            SeedWordsWallet::construct_new(cipher_seed.clone()).map_err(|e| js_err("failed to derive keys", e))?;
+        let seed_wallet = SeedWordsWallet::construct_new(cipher_seed.clone())
+            .map_err(|e| js_err("failed to derive keys", e))?;
         Ok(WasmWallet {
             key_manager: KeyManager::new(WalletType::SeedWords(seed_wallet))
                 .map_err(|e| js_err("failed to create wallet", e))?,
@@ -136,15 +276,86 @@ impl WasmWallet {
     pub fn from_backup_hex(backup_hex: &str, network: &str) -> Result<WasmWallet, JsValue> {
         let network = parse_network(network)?;
         let bytes = Vec::<u8>::from_hex(backup_hex).map_err(|e| js_err("invalid backup hex", e))?;
-        let seed = CipherSeed::from_enciphered_bytes(&bytes, None).map_err(|e| js_err("invalid backup data", e))?;
-        let seed_wallet =
-            SeedWordsWallet::construct_new(seed.clone()).map_err(|e| js_err("failed to derive keys", e))?;
+        let seed = CipherSeed::from_enciphered_bytes(&bytes, None)
+            .map_err(|e| js_err("invalid backup data", e))?;
+        let seed_wallet = SeedWordsWallet::construct_new(seed.clone())
+            .map_err(|e| js_err("failed to derive keys", e))?;
         Ok(WasmWallet {
             key_manager: KeyManager::new(WalletType::SeedWords(seed_wallet))
                 .map_err(|e| js_err("failed to restore wallet", e))?,
             network,
             cipher_seed: Some(seed),
         })
+    }
+
+    #[wasm_bindgen(js_name = fromViewKeyHex)]
+    pub fn from_view_key_hex(
+        private_view_key_hex: &str,
+        public_spend_key_hex: &str,
+        network: &str,
+    ) -> Result<WasmWallet, JsValue> {
+        let network = parse_network(network)?;
+        let private_view_key = PrivateKey::from_hex(private_view_key_hex)
+            .map_err(|e| js_err("invalid private view key", e))?;
+        let public_spend_key = CompressedPublicKey::from_hex(public_spend_key_hex)
+            .map_err(|e| js_err("invalid public spend key", e))?;
+        Self::from_view_parts(private_view_key, public_spend_key, network)
+    }
+
+    #[wasm_bindgen(js_name = fromViewKeyAndAddress)]
+    pub fn from_view_key_and_address(
+        private_view_key_hex: &str,
+        address: &str,
+    ) -> Result<WasmWallet, JsValue> {
+        let private_view_key = PrivateKey::from_hex(private_view_key_hex)
+            .map_err(|e| js_err("invalid private view key", e))?;
+        let address = TariAddress::from_base58(address)
+            .or_else(|_| TariAddress::from_emoji_string(address))
+            .or_else(|_| TariAddress::from_hex(address))
+            .map_err(|e| js_err("invalid address", e))?;
+        let expected = address
+            .public_view_key()
+            .ok_or_else(|| JsValue::from_str("view-key wallets require a dual Tari address"))?;
+        if &CompressedPublicKey::from_secret_key(&private_view_key) != expected {
+            return Err(JsValue::from_str(
+                "private view key does not match the Tari address public view key",
+            ));
+        }
+        let network = address.network();
+        set_current_network(network)?;
+        Self::from_view_parts(
+            private_view_key,
+            address.public_spend_key().clone(),
+            network,
+        )
+    }
+
+    #[wasm_bindgen(js_name = exportPrivateViewKeyHex)]
+    pub fn export_private_view_key_hex(&self) -> String {
+        self.key_manager.get_private_view_key().to_hex()
+    }
+
+    #[wasm_bindgen(getter, js_name = publicViewKeyHex)]
+    pub fn public_view_key_hex(&self) -> String {
+        self.key_manager.get_view_key().pub_key.to_hex()
+    }
+
+    #[wasm_bindgen(getter, js_name = publicSpendKeyHex)]
+    pub fn public_spend_key_hex(&self) -> String {
+        self.key_manager.get_spend_key().pub_key.to_hex()
+    }
+
+    #[wasm_bindgen(getter, js_name = isViewOnly)]
+    pub fn is_view_only(&self) -> bool {
+        matches!(
+            self.key_manager.get_wallet_type(),
+            WalletType::ViewWallet(_)
+        )
+    }
+
+    #[wasm_bindgen(getter, js_name = canSpend)]
+    pub fn can_spend(&self) -> bool {
+        !self.is_view_only()
     }
 
     /// Exports the wallet seed as an enciphered hex blob for persistence.
@@ -184,6 +395,8 @@ impl WasmWallet {
     /// sender offset key alone, so those are all this takes, and it returns a plain bool.
     ///
     /// The caller re-fetches and imports the winners properly; this is a filter, not an import.
+    /// Returns false if decryption fails or the recovered value/mask does not match the commitment.
+    /// Malformed input returns an error.
     #[wasm_bindgen(js_name = isOutputMine)]
     pub fn is_output_mine(
         &self,
@@ -191,20 +404,28 @@ impl WasmWallet {
         encrypted_data_hex: &str,
         sender_offset_pub_hex: &str,
     ) -> Result<bool, JsValue> {
-        let commitment =
-            CompressedCommitment::from_hex(commitment_hex).map_err(|e| js_err("invalid commitment", e))?;
-        let encrypted_bytes =
-            Vec::<u8>::from_hex(encrypted_data_hex).map_err(|e| js_err("invalid encrypted data", e))?;
-        let encrypted_data =
-            EncryptedData::from_bytes(&encrypted_bytes).map_err(|e| js_err("invalid encrypted data", e))?;
-        let sender_offset_pub = CompressedPublicKey::from_hex(sender_offset_pub_hex)
-            .map_err(|e| js_err("invalid sender offset public key", e))?;
-
         Ok(self
-            .key_manager
-            .try_output_key_recovery(&commitment, &encrypted_data, &sender_offset_pub)
-            .map_err(|e| js_err("recovery failed", e))?
+            .recover_output_data(commitment_hex, encrypted_data_hex, sender_offset_pub_hex)?
             .is_some())
+    }
+
+    /// Recovers a verified value and memo using the view key; errors if the output is not recoverable.
+    /// Free the returned handle after use.
+    #[wasm_bindgen(js_name = viewOutput)]
+    pub fn view_output(
+        &self,
+        commitment_hex: &str,
+        encrypted_data_hex: &str,
+        sender_offset_pub_hex: &str,
+    ) -> Result<WasmViewedOutput, JsValue> {
+        let (commitment, value, memo) = self
+            .recover_output_data(commitment_hex, encrypted_data_hex, sender_offset_pub_hex)?
+            .ok_or_else(|| JsValue::from_str("output does not belong to this wallet"))?;
+        Ok(WasmViewedOutput {
+            commitment_hex: commitment.to_hex(),
+            value,
+            memo,
+        })
     }
 
     /// Recovers a spendable output owned by this wallet from scanned chain data.
@@ -229,18 +450,22 @@ impl WasmWallet {
         range_proof_hex: &str,
         output_hash_hex: &str,
     ) -> Result<WasmWalletOutput, JsValue> {
-        let commitment = CompressedCommitment::from_hex(commitment_hex).map_err(|e| js_err("invalid commitment", e))?;
-        let encrypted_bytes =
-            Vec::<u8>::from_hex(encrypted_data_hex).map_err(|e| js_err("invalid encrypted data", e))?;
-        let encrypted_data =
-            EncryptedData::from_bytes(&encrypted_bytes).map_err(|e| js_err("invalid encrypted data", e))?;
+        if self.is_view_only() {
+            return Err(JsValue::from_str(
+                "view-only wallet cannot import spendable outputs",
+            ));
+        }
+        let commitment = CompressedCommitment::from_hex(commitment_hex)
+            .map_err(|e| js_err("invalid commitment", e))?;
+        let encrypted_bytes = Vec::<u8>::from_hex(encrypted_data_hex)
+            .map_err(|e| js_err("invalid encrypted data", e))?;
+        let encrypted_data = EncryptedData::from_bytes(&encrypted_bytes)
+            .map_err(|e| js_err("invalid encrypted data", e))?;
         let sender_offset_pub = CompressedPublicKey::from_hex(sender_offset_pub_hex)
             .map_err(|e| js_err("invalid sender offset public key", e))?;
 
         let (mask_key_id, value, memo) = self
-            .key_manager
-            .try_output_key_recovery(&commitment, &encrypted_data, &sender_offset_pub)
-            .map_err(|e| js_err("recovery failed", e))?
+            .recover_output_keys(&commitment, &encrypted_data, &sender_offset_pub)?
             .ok_or_else(|| JsValue::from_str("output does not belong to this wallet"))?;
 
         let mut covenant_bytes =
@@ -251,27 +476,32 @@ impl WasmWallet {
         let range_proof = if range_proof_hex.is_empty() {
             None
         } else {
-            let proof_bytes =
-                Vec::<u8>::from_hex(range_proof_hex).map_err(|e| js_err("invalid range proof", e))?;
+            let proof_bytes = Vec::<u8>::from_hex(range_proof_hex)
+                .map_err(|e| js_err("invalid range proof", e))?;
             Some(
                 RangeProof::from_canonical_bytes(&proof_bytes)
                     .map_err(|e| js_err("invalid range proof", e))?,
             )
         };
 
-        let script_bytes = Vec::<u8>::from_hex(script_hex).map_err(|e| js_err("invalid script", e))?;
-        let script = TariScript::from_bytes(&script_bytes).map_err(|e| js_err("invalid script", e))?;
-        let sig_bytes = Vec::<u8>::from_hex(metadata_sig_hex).map_err(|e| js_err("invalid metadata signature", e))?;
+        let script_bytes =
+            Vec::<u8>::from_hex(script_hex).map_err(|e| js_err("invalid script", e))?;
+        let script =
+            TariScript::from_bytes(&script_bytes).map_err(|e| js_err("invalid script", e))?;
+        let sig_bytes = Vec::<u8>::from_hex(metadata_sig_hex)
+            .map_err(|e| js_err("invalid metadata signature", e))?;
         let metadata_sig = ComAndPubSignature::deserialize(&mut sig_bytes.as_slice())
             .map_err(|e| js_err("invalid metadata signature", e))?;
 
-        let coinbase_extra =
-            Vec::<u8>::from_hex(coinbase_extra_hex).map_err(|e| js_err("invalid coinbase extra", e))?;
+        let coinbase_extra = Vec::<u8>::from_hex(coinbase_extra_hex)
+            .map_err(|e| js_err("invalid coinbase extra", e))?;
         let features = OutputFeatures::new(
             OutputFeaturesVersion::get_current_version(),
-            OutputType::from_byte(output_type_byte).ok_or_else(|| JsValue::from_str("invalid output type byte"))?,
+            OutputType::from_byte(output_type_byte)
+                .ok_or_else(|| JsValue::from_str("invalid output type byte"))?,
             maturity,
-            CoinBaseExtra::try_from(coinbase_extra).map_err(|e| js_err("invalid coinbase extra", e))?,
+            CoinBaseExtra::try_from(coinbase_extra)
+                .map_err(|e| js_err("invalid coinbase extra", e))?,
             None,
             RangeProofType::from_byte(range_proof_type_byte)
                 .ok_or_else(|| JsValue::from_str("invalid range proof type byte"))?,
@@ -284,8 +514,16 @@ impl WasmWallet {
         // of `1`s — meaningless to show, so it is reported as absent rather than passed through.
         let recovered_sender_fee = memo.get_fee().map(|f| f.as_u64());
         let recovered_sender = memo.get_sender_address().and_then(|address| {
-            let is_unset = address.public_spend_key().as_bytes().iter().all(|b| *b == 0);
-            if is_unset { None } else { Some(address.to_base58()) }
+            let is_unset = address
+                .public_spend_key()
+                .as_bytes()
+                .iter()
+                .all(|b| *b == 0);
+            if is_unset {
+                None
+            } else {
+                Some(address.to_base58())
+            }
         });
         let mask_str = SerializedKeyString::from(mask_key_id.to_string());
         let script_key_id = self
@@ -316,9 +554,12 @@ impl WasmWallet {
         let chain_hash = if output_hash_hex.is_empty() {
             None
         } else {
-            let hash_bytes =
-                Vec::<u8>::from_hex(output_hash_hex).map_err(|e| js_err("invalid output hash", e))?;
-            Some(FixedHash::try_from(&hash_bytes[..]).map_err(|e| js_err("invalid output hash", e))?)
+            let hash_bytes = Vec::<u8>::from_hex(output_hash_hex)
+                .map_err(|e| js_err("invalid output hash", e))?;
+            Some(
+                FixedHash::try_from(&hash_bytes[..])
+                    .map_err(|e| js_err("invalid output hash", e))?,
+            )
         };
 
         Ok(WasmWalletOutput {
@@ -335,8 +576,13 @@ impl WasmWallet {
     /// self-transfer construction before on-chain confirmation).
     #[wasm_bindgen(js_name = createSelfUtxo)]
     pub fn create_self_utxo(&self, value_micro: u64) -> Result<WasmWalletOutput, JsValue> {
-        let inner =
-            create_self_utxo_impl(&self.key_manager, value_micro).map_err(|e| js_err("failed to build output", e))?;
+        if self.is_view_only() {
+            return Err(JsValue::from_str(
+                "view-only wallet cannot create spendable outputs",
+            ));
+        }
+        let inner = create_self_utxo_impl(&self.key_manager, value_micro)
+            .map_err(|e| js_err("failed to build output", e))?;
         Ok(WasmWalletOutput {
             inner,
             chain_output_hash_hex: None,
@@ -390,7 +636,12 @@ pub fn create_self_utxo_impl(
         .map_err(|e| TransactionError::BuilderError(format!("script creation failed: {e}")))?;
 
     let encrypted_data = km
-        .encrypt_data_for_recovery(&mask_key.key_id, None, value.as_u64(), MemoField::new_empty())
+        .encrypt_data_for_recovery(
+            &mask_key.key_id,
+            None,
+            value.as_u64(),
+            MemoField::new_empty(),
+        )
         .map_err(|e| TransactionError::BuilderError(e.to_string()))?;
 
     let features = OutputFeatures::default();
@@ -504,13 +755,13 @@ pub fn build_stealth_payment(
                     builder
                         .with_compact_input(input, chain_hash)
                         .map_err(|e| js_err("adding compact input failed", e))?;
-                },
+                }
                 None => {
                     FULL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     builder
                         .with_input(input)
                         .map_err(|e| js_err("adding input failed", e))?;
-                },
+                }
             }
         }
         for (address, amount) in recipients.iter() {
@@ -529,7 +780,9 @@ pub fn build_stealth_payment(
                 )
                 .map_err(|e| js_err("adding recipient failed", e))?;
         }
-        builder.build().map_err(|e| js_err("building transaction failed", e))
+        builder
+            .build()
+            .map_err(|e| js_err("building transaction failed", e))
     };
 
     // The memo carries the fee the sender paid, but the fee depends on the weight the memo itself
@@ -715,7 +968,8 @@ impl WasmTxBuilder {
     /// Adds a recipient; `address` may be emoji, base58 or hex. Must be a dual/one-sided address.
     #[wasm_bindgen(js_name = addRecipient)]
     pub fn add_recipient(&mut self, address: &str, amount_micro: u64) -> Result<(), JsValue> {
-        let address = TariAddress::from_str(address).map_err(|e| js_err("invalid recipient address", e))?;
+        let address =
+            TariAddress::from_str(address).map_err(|e| js_err("invalid recipient address", e))?;
         if address.public_view_key().is_none() {
             return Err(JsValue::from_str(
                 "recipient address must be a dual (one-sided) address containing a view key",
@@ -755,22 +1009,28 @@ impl WasmTxBuilder {
 
     /// Produces the fully-signed transaction (range proofs included).
     pub fn build(self) -> Result<WasmSignedTransaction, JsValue> {
+        if self.wallet.is_view_only() {
+            return Err(JsValue::from_str(
+                "view-only wallet cannot build transactions",
+            ));
+        }
         let recipients: Vec<_> = self
             .recipient_addresses
             .into_iter()
             .zip(self.recipient_amounts)
             .collect();
-        let (transaction, fee_micro, change_value_micro, change_commitment_hex) = build_stealth_payment(
-            &self.wallet.key_manager,
-            self.wallet.network,
-            self.inputs,
-            self.compact_output_hashes,
-            recipients,
-            self.fee_per_gram_micro,
-            self.lock_height,
-            self.tip_height,
-            self.reveal_sender,
-        )?;
+        let (transaction, fee_micro, change_value_micro, change_commitment_hex) =
+            build_stealth_payment(
+                &self.wallet.key_manager,
+                self.wallet.network,
+                self.inputs,
+                self.compact_output_hashes,
+                recipients,
+                self.fee_per_gram_micro,
+                self.lock_height,
+                self.tip_height,
+                self.reveal_sender,
+            )?;
 
         Ok(WasmSignedTransaction {
             transaction,
@@ -825,6 +1085,7 @@ impl WasmSignedTransaction {
     /// Protobuf-encoded `SubmitTransactionRequest` for gRPC submission.
     #[wasm_bindgen(js_name = toSubmitRequestBytes)]
     pub fn to_submit_request_bytes(&self) -> Result<Vec<u8>, JsValue> {
-        crate::wire::submit_transaction_request_bytes(&self.transaction).map_err(|e| JsValue::from_str(&e))
+        crate::wire::submit_transaction_request_bytes(&self.transaction)
+            .map_err(|e| JsValue::from_str(&e))
     }
 }
