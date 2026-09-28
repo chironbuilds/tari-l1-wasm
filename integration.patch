@@ -1,0 +1,329 @@
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index 97c99eb58..cff8e1e97 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -10,6 +10,11 @@ linker = "x86_64-linux-gnu-gcc"
+ [target.x86_64-pc-windows-msvc]
+ rustflags = ["-ladvapi32"]
+ 
++# Required by getrandom >= 0.3 when compiling for wasm32-unknown-unknown so that
++# OS randomness is sourced from the browser/Node crypto.getRandomValues API.
++[target.wasm32-unknown-unknown]
++rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
++
+ [alias]
+ ci-fmt = "fmt --all -- --check"
+ ci-fmt-fix = "fmt --all"
+diff --git a/.github/workflows/npm_publish_tari_l1_wasm.yml b/.github/workflows/npm_publish_tari_l1_wasm.yml
+new file mode 100644
+index 000000000..3fd641b7b
+--- /dev/null
++++ b/.github/workflows/npm_publish_tari_l1_wasm.yml
+@@ -0,0 +1,59 @@
++name: Publish tari-l1-wasm to npm
++
++on:
++  # Publish manually from the Actions tab, providing your npm scope.
++  workflow_dispatch:
++    inputs:
++      scope:
++        description: "npm scope (e.g. @your-scope)"
++        required: true
++        default: "@your-scope"
++      dry_run:
++        description: "Prepare package but skip npm publish"
++        required: false
++        default: "false"
++
++jobs:
++  publish:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Install Rust toolchain
++        uses: dtolnay/rust-toolchain@stable
++        with:
++          targets: wasm32-unknown-unknown
++
++      - name: Cache cargo
++        uses: actions/cache@v4
++        with:
++          path: |
++            ~/.cargo/registry
++            ~/.cargo/git
++            target
++          key: wasm-pack-${{ hashFiles('Cargo.lock') }}
++
++      - name: Install wasm-pack
++        run: cargo install wasm-pack --locked
++
++      - name: Run native validation tests
++        run: cargo test -p tari_l1_wasm --test native_roundtrip
++
++      - name: Build WASM package
++        env:
++          CARGO_PROFILE_RELEASE_LTO: fat
++          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
++        run: >
++          wasm-pack build base_layer/tari_l1_wasm
++          --target bundler --release --out-dir pkg
++
++      - name: Prepare package metadata
++        working-directory: base_layer/tari_l1_wasm
++        run: node scripts/prepare-package.mjs --scope "${{ inputs.scope }}"
++
++      - name: Publish to npm
++        if: ${{ inputs.dry_run != 'true' }}
++        working-directory: base_layer/tari_l1_wasm/pkg
++        env:
++          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
++        run: npm publish --access public
+diff --git a/Cargo.lock b/Cargo.lock
+index ac69de8fe..ce73d18eb 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -149,7 +149,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+ dependencies = [
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -160,7 +160,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+ dependencies = [
+  "anstyle",
+  "once_cell_polyfill",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -2346,7 +2346,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -4305,6 +4305,7 @@ dependencies = [
+  "rand 0.10.1",
+  "rcgen",
+  "subtle",
++ "tari_common",
+  "tari_common_types",
+  "tari_comms",
+  "tari_core",
+@@ -5981,8 +5982,8 @@ version = "0.13.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
+ dependencies = [
+- "heck 0.4.1",
+- "itertools 0.10.5",
++ "heck 0.5.0",
++ "itertools 0.14.0",
+  "log",
+  "multimap 0.10.1",
+  "once_cell",
+@@ -6015,7 +6016,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+ dependencies = [
+  "anyhow",
+- "itertools 0.10.5",
++ "itertools 0.14.0",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.118",
+@@ -6609,7 +6610,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys 0.12.1",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -6666,7 +6667,7 @@ dependencies = [
+  "security-framework 3.7.0",
+  "security-framework-sys",
+  "webpki-root-certs",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -7265,7 +7266,7 @@ version = "0.8.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
+ dependencies = [
+- "heck 0.4.1",
++ "heck 0.5.0",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.118",
+@@ -7304,7 +7305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+ dependencies = [
+  "libc",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -7920,6 +7921,26 @@ dependencies = [
+  "thiserror 2.0.18",
+ ]
+ 
++[[package]]
++name = "tari_l1_wasm"
++version = "5.6.0-pre.1"
++dependencies = [
++ "blake2 0.10.6",
++ "borsh",
++ "getrandom 0.2.17",
++ "getrandom 0.4.3",
++ "prost 0.13.5",
++ "rand 0.10.1",
++ "serde_json",
++ "tari_common",
++ "tari_common_types",
++ "tari_crypto",
++ "tari_script",
++ "tari_transaction_components",
++ "tari_utilities",
++ "wasm-bindgen",
++]
++
+ [[package]]
+ name = "tari_libtor"
+ version = "5.6.0-pre.1"
+@@ -8241,7 +8262,7 @@ dependencies = [
+  "getrandom 0.4.3",
+  "once_cell",
+  "rustix 1.1.4",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -8251,7 +8272,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+ dependencies = [
+  "rustix 1.1.4",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -9300,7 +9321,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.48.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index a4f5c8a2b..d93fb8cbc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,6 +11,7 @@ members = [
+     "base_layer/core",
+     "base_layer/common_types",
+     "base_layer/transaction_components",
++    "base_layer/tari_l1_wasm",
+     "base_layer/node_components",
+     "base_layer/mmr",
+     "base_layer/p2p",
+diff --git a/base_layer/transaction_components/src/transaction_builder/builder.rs b/base_layer/transaction_components/src/transaction_builder/builder.rs
+index 654fcdc86..38373b84d 100644
+--- a/base_layer/transaction_components/src/transaction_builder/builder.rs
++++ b/base_layer/transaction_components/src/transaction_builder/builder.rs
+@@ -13,6 +13,7 @@ use tari_common_types::{
+         ComAndPubSignature,
+         CompressedCommitment,
+         CompressedPublicKey,
++        FixedHash,
+         CompressedSignature,
+         PrivateKey,
+         UncompressedPublicKey,
+@@ -39,6 +40,9 @@ use crate::{
+         MAX_TRANSACTION_INPUTS,
+         MAX_TRANSACTION_OUTPUTS,
+         OutputFeatures,
++        SpentOutput,
++        TransactionInput,
++        TransactionInputVersion,
+         TransactionKernel,
+         TransactionKernelVersion,
+         TransactionOutput,
+@@ -248,6 +252,46 @@ where KM: TransactionKeyManagerInterface
+         Ok(self)
+     }
+ 
++    /// Adds an input as a COMPACT input keyed by the chain-stored output hash.
++    ///
++    /// Light clients that cannot perfectly reconstruct every spent-output field can
++    /// pass the chain-stored hash instead; the base node hydrates the full UTXO from
++    /// its own database during validation.
++    pub fn with_compact_input(
++        &mut self,
++        mut input: WalletOutput,
++        chain_output_hash: FixedHash,
++    ) -> Result<&mut Self, TransactionBuilderError> {
++        let nonce = self.key_manager.get_random_key(None, None)?;
++        let version = TransactionInputVersion::get_current_version();
++        let script_message = TransactionInput::build_script_signature_message(
++            version,
++            input.script(),
++            input.input_data(),
++        );
++        let value: PrivateKey = input.value().into();
++        let script_signature = self
++            .key_manager
++            .get_script_signature(
++                input.script_key_id(),
++                input.commitment_mask_key_id(),
++                &value,
++                version,
++                &script_message,
++            )
++            .map_err(TransactionBuilderError::KeyManagerError)?;
++        let tx_in = TransactionInput::new(
++            version,
++            SpentOutput::OutputHash(chain_output_hash),
++            input.input_data().clone(),
++            script_signature,
++        );
++        let _unused = input.seed_transaction_input(tx_in);
++        let pair = OutputPair::new(input, nonce.key_id, None, None);
++        self.inputs.push(pair);
++        Ok(self)
++    }
++
+     /// This will allow the receipient to sign the burn commitment
+     pub fn with_burn_commitment(&mut self, commitment: Option<CompressedCommitment>) -> &mut Self {
+         self.burn_commitment = commitment;
+diff --git a/base_layer/transaction_components/src/transaction_components/wallet_output.rs b/base_layer/transaction_components/src/transaction_components/wallet_output.rs
+index 9a5a10221..bf4d8db23 100644
+--- a/base_layer/transaction_components/src/transaction_components/wallet_output.rs
++++ b/base_layer/transaction_components/src/transaction_components/wallet_output.rs
+@@ -811,6 +811,13 @@ impl WalletOutput {
+         self.recalculate_hash();
+     }
+ 
++    /// Pre-seed the cached transaction input. Light clients that rebuild inputs from
++    /// chain-provided data (e.g. compact inputs carrying the chain-stored output hash)
++    /// can seed the exact input here so `to_transaction_input` returns it verbatim.
++    pub fn seed_transaction_input(&self, input: TransactionInput) {
++        let _unused = self.input.set(input);
++    }
++
+     pub fn payment_id(&self) -> &MemoField {
+         &self.payment_id
+     }

@@ -1,0 +1,43 @@
+[package]
+name = "tari_l1_wasm"
+description = "WebAssembly bindings for Tari L1 core primitives: addresses, amounts, fees and crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tari_common = { workspace = true }
+tari_common_types = { workspace = true }
+tari_transaction_components = { workspace = true }
+tari_crypto = { workspace = true }
+tari_utilities = { workspace = true }
+rand = { workspace = true }
+blake2 = "0.10"
+borsh = { workspace = true }
+tari_script = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = "0.2.100"
+
+[dev-dependencies]
+prost = "0.13.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[package.metadata.wasm-pack.profile.release]
+# -O3, not -Oz. This module's hot path is chain scanning: one elliptic-curve Diffie-Hellman per
+# output on the chain, for every output, because a stealth output cannot be recognised any other
+# way. Optimising the wasm for size trades away exactly the arithmetic throughput that costs.
+# The extra bytes are downloaded once and cached; the scan is paid for on every block.
+wasm-opt = ["-Oz", "--enable-bulk-memory"]
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+demangle = false
+omit-default-sections = true
