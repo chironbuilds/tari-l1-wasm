@@ -78,9 +78,12 @@ try {
 // --- Recipient ---
 const recoveryFixture = JSON.parse(readFileSync(new URL("./tests/fixtures/output_recovery.json", import.meta.url), "utf8"));
 const recoveryWallet = WasmWallet.fromBackupHex(recoveryFixture.backupHex, "esmeralda");
-const importArgs = recoveryFixture.importArgs.map((value, index) =>
-  index === 2 || index === 3 ? BigInt(value) : index === 4 || index === 5 ? Number(value) : value,
-);
+const [scriptHex, metadataSignatureHex, minimumValuePromise, maturity, outputType, rangeProofType,
+  coinbaseExtraHex, covenantHex, rangeProofHex, outputHashHex] = recoveryFixture.importArgs;
+const importArgs = [
+  scriptHex, metadataSignatureHex, BigInt(minimumValuePromise), BigInt(maturity),
+  Number(outputType), Number(rangeProofType), coinbaseExtraHex, covenantHex, rangeProofHex, outputHashHex,
+];
 for (const fixture of recoveryFixture.cases) {
   const args = [recoveryFixture.commitmentHex, fixture.encryptedDataHex, recoveryFixture.senderOffsetPublicKeyHex];
   check(`detect ${fixture.name}`, recoveryWallet.isOutputMine(...args) === fixture.valid);

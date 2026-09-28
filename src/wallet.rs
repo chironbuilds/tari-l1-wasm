@@ -119,6 +119,7 @@ pub struct WasmWallet {
     cipher_seed: Option<CipherSeed>,
 }
 
+/// A verified output value and memo, without spending authority. Free the handle after use.
 #[wasm_bindgen]
 pub struct WasmViewedOutput {
     commitment_hex: String,
@@ -128,36 +129,43 @@ pub struct WasmViewedOutput {
 
 #[wasm_bindgen]
 impl WasmViewedOutput {
+    /// Commitment encoded as lowercase hex.
     #[wasm_bindgen(getter, js_name = commitmentHex)]
     pub fn commitment_hex(&self) -> String {
         self.commitment_hex.clone()
     }
 
+    /// Recovered value in microMinotari, verified against the commitment.
     #[wasm_bindgen(getter, js_name = valueMicro)]
     pub fn value_micro(&self) -> u64 {
         self.value.as_u64()
     }
 
+    /// Raw payment ID bytes from the memo.
     #[wasm_bindgen(getter, js_name = paymentId)]
     pub fn payment_id(&self) -> Vec<u8> {
         self.memo.get_payment_id()
     }
 
+    /// Payment ID as UTF-8 text, or undefined if decoding fails.
     #[wasm_bindgen(getter, js_name = paymentIdText)]
     pub fn payment_id_text(&self) -> Option<String> {
         String::from_utf8(self.memo.get_payment_id()).ok()
     }
 
+    /// Sender-reported fee in microMinotari, when present in the memo.
     #[wasm_bindgen(getter, js_name = senderFeeMicro)]
     pub fn sender_fee_micro(&self) -> Option<u64> {
         self.memo.get_fee().map(|fee| fee.as_u64())
     }
 
+    /// Transaction type label reported by the memo.
     #[wasm_bindgen(getter, js_name = txType)]
     pub fn tx_type(&self) -> String {
         self.memo.get_type().to_string()
     }
 
+    /// Complete serialized memo, including its type and payment ID.
     #[wasm_bindgen(getter, js_name = memoBytes)]
     pub fn memo_bytes(&self) -> Vec<u8> {
         self.memo.to_bytes()
@@ -201,12 +209,12 @@ impl WasmWallet {
         })
     }
 
-    fn recover_viewed_output(
+    fn recover_output_data(
         &self,
         commitment_hex: &str,
         encrypted_data_hex: &str,
         sender_offset_pub_hex: &str,
-    ) -> Result<Option<WasmViewedOutput>, JsValue> {
+    ) -> Result<Option<(CompressedCommitment, MicroMinotari, MemoField)>, JsValue> {
         let commitment = CompressedCommitment::from_hex(commitment_hex)
             .map_err(|e| js_err("invalid commitment", e))?;
         let encrypted_bytes = Vec::<u8>::from_hex(encrypted_data_hex)
@@ -220,11 +228,7 @@ impl WasmWallet {
         else {
             return Ok(None);
         };
-        Ok(Some(WasmViewedOutput {
-            commitment_hex: commitment.to_hex(),
-            value,
-            memo,
-        }))
+        Ok(Some((commitment, value, memo)))
     }
 
     fn recover_output_keys(
@@ -391,6 +395,8 @@ impl WasmWallet {
     /// sender offset key alone, so those are all this takes, and it returns a plain bool.
     ///
     /// The caller re-fetches and imports the winners properly; this is a filter, not an import.
+    /// Returns false if decryption fails or the recovered value/mask does not match the commitment.
+    /// Malformed input returns an error.
     #[wasm_bindgen(js_name = isOutputMine)]
     pub fn is_output_mine(
         &self,
@@ -399,10 +405,12 @@ impl WasmWallet {
         sender_offset_pub_hex: &str,
     ) -> Result<bool, JsValue> {
         Ok(self
-            .recover_viewed_output(commitment_hex, encrypted_data_hex, sender_offset_pub_hex)?
+            .recover_output_data(commitment_hex, encrypted_data_hex, sender_offset_pub_hex)?
             .is_some())
     }
 
+    /// Recovers a verified value and memo using the view key; errors if the output is not recoverable.
+    /// Free the returned handle after use.
     #[wasm_bindgen(js_name = viewOutput)]
     pub fn view_output(
         &self,
@@ -410,8 +418,14 @@ impl WasmWallet {
         encrypted_data_hex: &str,
         sender_offset_pub_hex: &str,
     ) -> Result<WasmViewedOutput, JsValue> {
-        self.recover_viewed_output(commitment_hex, encrypted_data_hex, sender_offset_pub_hex)?
-            .ok_or_else(|| JsValue::from_str("output is not recoverable with this wallet view key"))
+        let (commitment, value, memo) = self
+            .recover_output_data(commitment_hex, encrypted_data_hex, sender_offset_pub_hex)?
+            .ok_or_else(|| JsValue::from_str("output does not belong to this wallet"))?;
+        Ok(WasmViewedOutput {
+            commitment_hex: commitment.to_hex(),
+            value,
+            memo,
+        })
     }
 
     /// Recovers a spendable output owned by this wallet from scanned chain data.
