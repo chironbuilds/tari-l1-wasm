@@ -21,6 +21,7 @@ fn view_wallet_recovers_only_valid_outputs() {
     .unwrap();
     assert!(watch.is_view_only());
     assert!(!watch.can_spend());
+    let unrelated = WasmWallet::new("mainnet").unwrap();
     assert_eq!(
         watch.get_address().unwrap().to_base58(),
         WasmWallet::from_view_key_and_address(
@@ -59,6 +60,7 @@ fn view_wallet_recovers_only_valid_outputs() {
             )
             .unwrap();
             let args = (commitment.to_hex(), data.to_hex(), sender.to_hex());
+            assert!(!unrelated.is_output_mine(&args.0, &args.1, &args.2).unwrap());
             assert_eq!(
                 watch.is_output_mine(&args.0, &args.1, &args.2).unwrap(),
                 expected

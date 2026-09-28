@@ -180,6 +180,17 @@ impl WasmWallet {
         public_spend_key: CompressedPublicKey,
         network: Network,
     ) -> Result<Self, JsValue> {
+        if private_view_key == PrivateKey::default() {
+            return Err(JsValue::from_str("private view key must not be zero"));
+        }
+        public_spend_key
+            .to_public_key()
+            .map_err(|e| js_err("invalid public spend key", e))?;
+        if public_spend_key == CompressedPublicKey::default() {
+            return Err(JsValue::from_str(
+                "public spend key must not be the identity",
+            ));
+        }
         let wallet = ViewWallet::new(public_spend_key, private_view_key, None);
         let key_manager = KeyManager::new(WalletType::ViewWallet(wallet))
             .map_err(|e| js_err("failed to create view wallet", e))?;
@@ -204,25 +215,39 @@ impl WasmWallet {
             .map_err(|e| js_err("invalid encrypted data", e))?;
         let sender_offset_pub = CompressedPublicKey::from_hex(sender_offset_pub_hex)
             .map_err(|e| js_err("invalid sender offset public key", e))?;
+        let Some((_, value, memo)) =
+            self.recover_output_keys(&commitment, &encrypted_data, &sender_offset_pub)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(WasmViewedOutput {
+            commitment_hex: commitment.to_hex(),
+            value,
+            memo,
+        }))
+    }
+
+    fn recover_output_keys(
+        &self,
+        commitment: &CompressedCommitment,
+        encrypted_data: &EncryptedData,
+        sender_offset_pub: &CompressedPublicKey,
+    ) -> Result<Option<(TariKeyId, MicroMinotari, MemoField)>, JsValue> {
         let recovered = self
             .key_manager
-            .try_output_key_recovery(&commitment, &encrypted_data, &sender_offset_pub)
+            .try_output_key_recovery(commitment, encrypted_data, sender_offset_pub)
             .map_err(|e| js_err("recovery failed", e))?;
         let Some((key_id, value, memo)) = recovered else {
             return Ok(None);
         };
         if !self
             .key_manager
-            .verify_mask(&commitment, &key_id, value.as_u64())
+            .verify_mask(commitment, &key_id, value.as_u64())
             .map_err(|e| js_err("mask verification failed", e))?
         {
             return Ok(None);
         }
-        Ok(Some(WasmViewedOutput {
-            commitment_hex: commitment.to_hex(),
-            value,
-            memo,
-        }))
+        Ok(Some((key_id, value, memo)))
     }
 }
 
@@ -426,9 +451,7 @@ impl WasmWallet {
             .map_err(|e| js_err("invalid sender offset public key", e))?;
 
         let (mask_key_id, value, memo) = self
-            .key_manager
-            .try_output_key_recovery(&commitment, &encrypted_data, &sender_offset_pub)
-            .map_err(|e| js_err("recovery failed", e))?
+            .recover_output_keys(&commitment, &encrypted_data, &sender_offset_pub)?
             .ok_or_else(|| JsValue::from_str("output does not belong to this wallet"))?;
 
         let mut covenant_bytes =
