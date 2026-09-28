@@ -73,6 +73,16 @@ await fetch(nodeUrl + "/json_rpc", {
 
 Recipients must be dual ("one-sided") addresses containing a view key.
 
+## Watch-only scanning
+
+Export a wallet's private view key with `exportPrivateViewKeyHex()`, then create
+a watch-only wallet with `WasmWallet.fromViewKeyAndAddress(key, dualAddress)`.
+Alternatively, use `fromViewKeyHex(key, publicSpendKey, network)`.
+
+Use `isOutputMine(commitment, encryptedData, senderOffsetPub)` to detect outputs,
+or `viewOutput(...)` to recover their value and memo. Free the returned handle.
+Watch-only wallets cannot spend.
+
 ## Building from source
 
 Because this is a monorepo crate, build it inside a Tari checkout:

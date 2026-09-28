@@ -46,6 +46,15 @@ const restored = WasmWallet.fromBackupHex(backup, "esmeralda");
 check("backup restore produces same address", restored.getAddress().toBase58() === alice.getAddress().toBase58());
 const aliceAddr = alice.getAddress();
 check("alice address is dual one-sided", !aliceAddr.isSingle && aliceAddr.network === "esmeralda");
+const watch = WasmWallet.fromViewKeyAndAddress(alice.exportPrivateViewKeyHex(), aliceAddr.toBase58());
+check("watch-only address matches", watch.getAddress().toBase58() === aliceAddr.toBase58());
+check("watch-only cannot spend", watch.isViewOnly && !watch.canSpend);
+try {
+  watch.createSelfUtxo(1n);
+  check("watch-only output creation rejects", false);
+} catch {
+  check("watch-only output creation rejects", true);
+}
 
 // --- Recipient ---
 const bob = new WasmWallet("esmeralda");
@@ -74,7 +83,7 @@ check("submit request payload > 1KB (range proofs included)", submitBytes.length
 console.log(`  submit payload size: ${submitBytes.length} bytes`);
 
 // Multi-recipient build
-const carol = new WasmWallet("mainnet");
+const carol = new WasmWallet("esmeralda");
 const utxo2 = alice.createSelfUtxo(3_000_000n);
 const b2 = new WasmTxBuilder(alice);
 b2.addInput(utxo2);
