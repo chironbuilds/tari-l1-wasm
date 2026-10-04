@@ -36,6 +36,7 @@ use tari_script::{script, TariScript};
 use tari_transaction_components::{
     consensus::{ConsensusConstants, NetworkConsensus},
     key_manager::{
+        error::KeyManagerError,
         wallet_types::{SeedWordsWallet, ViewWallet, WalletType},
         KeyManager, SerializedKeyString, TariKeyId, TransactionKeyManagerInterface,
     },
@@ -244,14 +245,11 @@ impl WasmWallet {
         let Some((key_id, value, memo)) = recovered else {
             return Ok(None);
         };
-        if !self
-            .key_manager
-            .verify_mask(commitment, &key_id, value.as_u64())
-            .map_err(|e| js_err("mask verification failed", e))?
-        {
-            return Ok(None);
+        match self.key_manager.verify_mask(commitment, &key_id, value.as_u64()) {
+            Ok(()) => Ok(Some((key_id, value, memo))),
+            Err(KeyManagerError::InvalidMask) => Ok(None),
+            Err(e) => Err(js_err("mask verification failed", e)),
         }
-        Ok(Some((key_id, value, memo)))
     }
 }
 
@@ -780,6 +778,13 @@ pub fn build_stealth_payment(
                 )
                 .map_err(|e| js_err("adding recipient failed", e))?;
         }
+        // Every recipient above registered a spec rather than a key; this is the single point
+        // that folds the input script keys into the script offset and allocates one sender
+        // offset key per spec (plus one for change, decided here too) -- `build()` refuses to
+        // run before it.
+        builder
+            .reserve_sender_offset_keys(&[])
+            .map_err(|e| js_err("reserving sender offset keys failed", e))?;
         builder
             .build()
             .map_err(|e| js_err("building transaction failed", e))

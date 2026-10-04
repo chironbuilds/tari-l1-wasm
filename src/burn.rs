@@ -13,11 +13,12 @@
 //! only exists once the burn is mined — fetch it from a base node's `/generate_kernel_merkle_proof`
 //! with `kernelNonceHex`/`kernelSignatureHex`.
 
-use tari_common_types::types::{CompressedPublicKey, FixedHash};
+use tari_common_types::types::{CompressedPublicKey, FixedHash, PrivateKey};
 use tari_script::script;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
-    key_manager::{TariKeyId, TransactionKeyManagerInterface},
+    transaction_builder::PendingOutput,
+    key_manager::{SecretTransactionKeyManagerInterface, TariKeyId, TransactionKeyManagerInterface},
     transaction_components::{
         KernelFeatures, MemoField, OutputFeatures, Transaction, WalletOutput, WalletOutputBuilder,
         memo_field::TxType,
@@ -170,11 +171,26 @@ pub fn build_burn(
         .try_build(km)
         .map_err(|e| js_err("building burn output failed", e))?;
 
+    let features_and_scripts_size = output
+        .features_and_scripts_byte_size()
+        .map_err(|e| js_err("measuring burn output failed", e))?;
+    builder
+        .reserve_sender_offset_keys(&[PendingOutput::custom_sender_offset(amount, features_and_scripts_size)])
+        .map_err(|e| js_err("reserving sender offset keys failed", e))?;
+    // The burn output publishes its own seed-derived `r` rather than a key from the reservation
+    // pool, so its contribution to the transaction's aggregate script offset has to be registered
+    // separately -- exactly the case `with_host_derived_partial_script_offset`'s own doc comment
+    // names ("an L2 bound burn's `r`").
+    let sender_offset_private_key = km
+        .get_private_key(&sender_offset.key_id)
+        .map_err(|e| js_err("revealing sender offset key failed", e))?;
+    builder.with_host_derived_partial_script_offset(PrivateKey::default() - sender_offset_private_key);
+
     builder
         .add_recipient(
             Default::default(),
             output,
-            Some(sender_offset.key_id.clone()),
+            sender_offset.key_id.clone(),
             Some(recovery_key_id),
         )
         .map_err(|e| js_err("adding burn output failed", e))?;

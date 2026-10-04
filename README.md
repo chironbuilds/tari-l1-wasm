@@ -91,7 +91,7 @@ Because this is a monorepo crate, build it inside a Tari checkout:
 # 1. Clone the Tari monorepo this was built against
 git clone https://github.com/tari-project/tari.git
 cd tari
-git checkout v5.6.0-pre.1
+git checkout 2907aa95eecf4477ae033157503ab9113c5f457b  # 2026-10-02, just past v6.0.1-pre.2
 
 # 2. Drop this crate's source into place (replace <this-repo> with your clone of this repo)
 mkdir -p base_layer/tari_l1_wasm
