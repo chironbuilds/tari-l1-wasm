@@ -42,6 +42,7 @@ use tari_transaction_components::{
     },
     transaction_components::TransactionError,
     transaction_components::{
+        memo_field::TxType,
         covenants::Covenant, CoinBaseExtra, EncryptedData, MemoField, OutputFeatures,
         OutputFeaturesVersion, OutputType, RangeProofType, TransactionOutput,
         TransactionOutputVersion, WalletOutput,
@@ -763,11 +764,23 @@ pub fn build_stealth_payment(
             }
         }
         for (address, amount) in recipients.iter() {
+            // A payment id carried by the recipient's address is what an exchange credits a deposit
+            // by, so it must reach the output's memo. Tari's own wallet does the same (the
+            // "Address contains memo, overriding memo" path in transaction_service).
+            let address_payment_id = address.get_memo_field_payment_id_bytes();
+            let base_memo = if address.features().contains(TariAddressFeatures::PAYMENT_ID)
+                && !address_payment_id.is_empty()
+            {
+                MemoField::new_open(address_payment_id, TxType::PaymentToOther)
+                    .map_err(|e| js_err("recipient payment id rejected", e))?
+            } else {
+                MemoField::new_empty()
+            };
             let memo = match &sender_address {
-                Some(own) => MemoField::new_empty()
+                Some(own) => base_memo
                     .add_sender_address(own.clone(), true, memo_fee, None)
                     .map_err(|e| js_err("failed to attach the sender address", e))?,
-                None => MemoField::new_empty(),
+                None => base_memo,
             };
             builder
                 .add_stealth_recipient(
